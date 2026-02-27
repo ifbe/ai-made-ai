@@ -8,9 +8,48 @@ import numpy as np
 BOARD_SIZE = 15
 BOARD_POSITIONS = BOARD_SIZE * BOARD_SIZE
 
+class AttentionFusion(nn.Module):
+    """注意力融合模块 - 为每个头动态分配权重"""
+    def __init__(self, feat_dim=32, d_model=64, dropout=0.1):
+        super().__init__()
+        self.feat_dim = feat_dim
+        self.total_dim = feat_dim * 3  # 96
+        
+        # 为每个头生成注意力权重
+        self.fear_attn = nn.Linear(feat_dim, 1)
+        self.greed_attn = nn.Linear(feat_dim, 1)
+        self.normal_attn = nn.Linear(feat_dim, 1)
+        
+        # 融合后的处理
+        self.fusion = nn.Sequential(
+            nn.Linear(self.total_dim, d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, 1)
+        )
+    
+    def forward(self, fear, greed, normal):
+        # fear, greed, normal: [batch, 225, 32]
+        
+        # 每个头自己决定自己的重要性
+        fear_weight = torch.sigmoid(self.fear_attn(fear))  # [batch, 225, 1]
+        greed_weight = torch.sigmoid(self.greed_attn(greed))
+        normal_weight = torch.sigmoid(self.normal_attn(normal))
+        
+        # 加权特征
+        weighted_fear = fear * fear_weight
+        weighted_greed = greed * greed_weight
+        weighted_normal = normal * normal_weight
+        
+        # 拼接
+        combined = torch.cat([weighted_fear, weighted_greed, weighted_normal], dim=-1)  # [batch, 225, 96]
+        
+        # 融合
+        return self.fusion(combined)  # [batch, 225, 1]
+
 class FearGreedWuziqiModel(nn.Module):
-    """五子棋恐惧与贪婪模型 - 修正版"""
-    def __init__(self, d_model=128, nhead=4, num_layers=3, dim_feedforward=512, dropout=0.1):
+    """五子棋恐惧与贪婪模型 - 注意力融合版"""
+    def __init__(self, d_model=128, nhead=4, num_layers=2, dim_feedforward=256, dropout=0.1):
         super().__init__()
         
         self.d_model = d_model
@@ -36,41 +75,37 @@ class FearGreedWuziqiModel(nn.Module):
         # LayerNorm
         self.norm = nn.LayerNorm(d_model)
         
-        # 恐惧头 - 每个位置输出一个分数 (修正)
+        # 恐惧头 - 每个位置输出32维特征
         self.fear_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1),  # 直接输出1个分数
-            nn.Sigmoid()  # 确保在0-1之间
+            nn.Linear(d_model // 2, d_model // 4),  # 32维
+            nn.ReLU(),
         )
         
-        # 贪婪头 - 每个位置输出一个分数 (修正)
+        # 贪婪头 - 每个位置输出32维特征
         self.greed_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1),
-            nn.Sigmoid()
+            nn.Linear(d_model // 2, d_model // 4),  # 32维
+            nn.ReLU(),
         )
         
-        # 普通策略头 - 每个位置输出一个分数 (修正)
+        # 普通策略头 - 每个位置输出32维特征
         self.normal_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1),
-            nn.Sigmoid()
-        )
-        
-        # 位置融合层 - 为每个位置独立融合三个分数
-        self.position_fusion = nn.Sequential(
-            nn.Linear(3, d_model // 4),
+            nn.Linear(d_model // 2, d_model // 4),  # 32维
             nn.ReLU(),
-            nn.Linear(d_model // 4, 1)
         )
         
-        # 全局价值头
+        # 注意力融合层
+        self.position_fusion = AttentionFusion(feat_dim=32, d_model=64, dropout=dropout)
+        
+        # 价值头（用全局特征）
         self.value_head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
@@ -98,7 +133,7 @@ class FearGreedWuziqiModel(nn.Module):
     
     def forward_with_mask(self, board, turn=None, legal_moves=None, return_details=False):
         """
-        带合法移动掩码的前向传播
+        带合法移动掩码的前向传播 - 注意力融合版
         legal_moves: list of lists, 每个样本的合法位置列表
         """
         batch_size = board.size(0)
@@ -107,29 +142,28 @@ class FearGreedWuziqiModel(nn.Module):
         emb = self.state_embedding(board) * math.sqrt(self.d_model)
         emb = emb + self.pos_embedding
         
-        # 加入回合信息 (权重加大)
+        # 加入回合信息
         if turn is not None:
             turn_emb = self.turn_embedding(turn).unsqueeze(1).expand(-1, self.num_positions, -1)
-            emb = emb + turn_emb  # 去掉0.1的权重，直接加
+            emb = emb + turn_emb
         
         # Transformer编码器
         memory = self.encoder(emb)
         memory = self.norm(memory)
         
-        # 全局特征 (用于价值评估)
+        # 全局特征（用于价值评估）
         global_feat = memory.mean(dim=1)
         
-        # 三个头 - 每个位置输出一个分数 [batch, 225, 1]
-        fear_scores = self.fear_head(memory).squeeze(-1)      # [batch, 225]
-        greed_scores = self.greed_head(memory).squeeze(-1)    # [batch, 225]
-        normal_scores = self.normal_head(memory).squeeze(-1)  # [batch, 225]
+        # 三个头 - 每个位置输出32维特征 [batch, 225, 32]
+        fear_features = self.fear_head(memory)
+        greed_features = self.greed_head(memory)
+        normal_features = self.normal_head(memory)
         
-        # 为每个位置独立融合三个分数
-        # 将三个分数堆叠成 [batch, 225, 3]
-        combined_scores = torch.stack([fear_scores, greed_scores, normal_scores], dim=-1)
+        # 注意力融合 - 对每个位置独立决策
+        position_scores = self.position_fusion(fear_features, greed_features, normal_features)  # [batch, 225, 1]
         
-        # 对每个位置独立应用融合层
-        policy_logits = self.position_fusion(combined_scores).squeeze(-1)  # [batch, 225]
+        # 去掉最后一维，得到 [batch, 225]
+        policy_logits = position_scores.squeeze(-1)
         
         # 如果有legal_moves，只计算合法位置的概率
         if legal_moves is not None:
@@ -144,6 +178,14 @@ class FearGreedWuziqiModel(nn.Module):
         value = self.value_head(global_feat)
         
         if return_details:
+            # 为了可视化，对特征取平均得到每个位置的分数（并压缩到0-1）
+            # fear_scores = torch.sigmoid(fear_features.mean(dim=-1))      # [batch, 225]
+            # greed_scores = torch.sigmoid(greed_features.mean(dim=-1))    # [batch, 225]
+            # normal_scores = torch.sigmoid(normal_features.mean(dim=-1))  # [batch, 225]
+            fear_scores = fear_features.mean(dim=-1)      # [batch, 225]
+            greed_scores = greed_features.mean(dim=-1)    # [batch, 225]
+            normal_scores = normal_features.mean(dim=-1)  # [batch, 225]
+            
             return {
                 'policy': policy_logits,
                 'value': value,
@@ -170,6 +212,7 @@ class FearGreedWuziqiModel(nn.Module):
                     'policy': np.zeros(BOARD_POSITIONS),
                     'fear': np.zeros(BOARD_POSITIONS),
                     'greed': np.zeros(BOARD_POSITIONS),
+                    'normal': np.zeros(BOARD_POSITIONS),
                     'value': 0.0,
                     'attention': 0.5,
                     'nearby': [center_pos]
@@ -185,8 +228,8 @@ class FearGreedWuziqiModel(nn.Module):
             policy = F.softmax(details['policy'][0], dim=-1).cpu().numpy()
             fear_scores = details['fear_scores'][0].cpu().numpy()
             greed_scores = details['greed_scores'][0].cpu().numpy()
+            normal_scores = details['normal_scores'][0].cpu().numpy()
             
-            # 从附近位置中选择最佳位置
             nearby_probs = {pos: policy[pos] for pos in nearby}
             best_move = max(nearby_probs.items(), key=lambda x: x[1])[0]
             
@@ -198,13 +241,14 @@ class FearGreedWuziqiModel(nn.Module):
                 sorted_moves = sorted(nearby_probs.items(), key=lambda x: x[1], reverse=True)[:5]
                 for pos, prob in sorted_moves:
                     from game import pos_to_str
-                    print(f"   {pos_to_str(pos)}: 概率={prob:.3f}, 恐惧={fear_scores[pos]:.3f}, 贪婪={greed_scores[pos]:.3f}")
+                    print(f"   {pos_to_str(pos)}: 概率={prob:.3f}, 恐惧={fear_scores[pos]:.3f}, 贪婪={greed_scores[pos]:.3f}, 普通={normal_scores[pos]:.3f}")
             
             return {
                 'move': best_move,
                 'policy': policy,
                 'fear': fear_scores,
                 'greed': greed_scores,
+                'normal': normal_scores,
                 'value': value,
                 'attention': attention,
                 'nearby': nearby
