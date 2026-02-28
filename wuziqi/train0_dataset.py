@@ -149,7 +149,7 @@ class Stage0Trainer:
             fear_targets = torch.stack(fear_targets)
             fear_scores = details['fear_scores']
             fear_loss = F.binary_cross_entropy(fear_scores, fear_targets)
-            total_loss += 0.1 * fear_loss
+            total_loss += 0.3 * fear_loss
         
         # 辅助损失2：贪婪分数（如果有标签）
         greed_mask = [g is not None for g in greed_labels]
@@ -164,7 +164,7 @@ class Stage0Trainer:
             greed_targets = torch.stack(greed_targets)
             greed_scores = details['greed_scores']
             greed_loss = F.binary_cross_entropy(greed_scores, greed_targets)
-            total_loss += 0.1 * greed_loss
+            total_loss += 0.4 * greed_loss
         
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -210,6 +210,10 @@ class Stage0Trainer:
                 board = item['board']
                 player = item['player']
                 correct_action = item['move']
+
+                scene_type = item['scene_type']
+                fear_label = item.get('fear_label')
+                greed_label = item.get('greed_label')
                 
                 nearby = get_nearby_moves(board, distance=2)
                 if not nearby:
@@ -227,8 +231,23 @@ class Stage0Trainer:
                 
                 if nearby_probs:
                     predicted = max(nearby_probs, key=lambda x: x[1])[0]
+
+                    # 其他情况（理论上不会进入这里，因为只评估fear/greed）
                     if predicted == correct_action:
                         correct += 1
+                    elif scene_type == 'greed' and greed_label is not None:
+                        # 贪婪场景：只要选任意贪婪点就算对
+                        greed_positions = [i for i, v in enumerate(greed_label) if v > 0]
+                        if predicted in greed_positions:
+                            correct += 1
+                        else:
+                            # 可以打印调试信息
+                            pass
+                    elif scene_type == 'fear' and fear_label is not None:
+                        # 恐惧场景：只要选任意恐惧点就算对
+                        fear_positions = [i for i, v in enumerate(fear_label) if v > 0]
+                        if predicted in fear_positions:
+                            correct += 1
                     total += 1
         
         return correct / total if total > 0 else 0

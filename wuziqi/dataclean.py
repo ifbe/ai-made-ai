@@ -1,6 +1,8 @@
 # clean_dataset.py
 import pickle
 import argparse
+import random
+import numpy as np
 import shutil
 from collections import defaultdict
 from game import (
@@ -10,6 +12,7 @@ from game import (
 )
 
 def is_real_winning_move(board, player, pos):
+    """检查是否是真正的获胜机会 - 下这里能直接赢"""
     if board[pos] != EMPTY:
         return False
     board[pos] = player
@@ -18,6 +21,7 @@ def is_real_winning_move(board, player, pos):
     return result
 
 def is_real_threat(board, player, pos):
+    """检查是否是真正的威胁 - 对手下这里能直接赢"""
     opponent = 3 - player
     if board[pos] != EMPTY:
         return False
@@ -26,189 +30,240 @@ def is_real_threat(board, player, pos):
     board[pos] = EMPTY
     return result
 
-def analyze_dataset(input_file, output_file=None, delete=False):
+def analyze_dataset(input_file, output_file=None, fix=False, delete=False):
+    """
+    分析并修复数据集
+    fix=True: 修复问题样本
+    delete=True: 删除问题样本
+    fix=False and delete=False: 只分析不修改
+    """
     print(f"加载数据集: {input_file}")
     with open(input_file, "rb") as f:
         data = pickle.load(f)
     
-    print(f"总样本数: {len(data)} 条")
+    print(f"原始数据: {len(data)} 条")
     print("=" * 60)
     
     stats = defaultdict(int)
-    issues = []
+    cleaned_data = []
+    fixed_count = 0
+    deleted_count = 0
     
     for idx, item in enumerate(data):
         if len(item) < 7:
             stats['invalid_format'] += 1
-            issues.append(f"样本 #{idx}: 格式错误")
+            if delete:
+                deleted_count += 1
+            else:
+                cleaned_data.append(item)
             continue
             
         board, player, action, value, fear_label, greed_label, scene_type = item[:7]
         
-        if player not in [BLACK, WHITE]:
-            issues.append(f"样本 #{idx}: 无效玩家值 {player}")
-            stats['invalid_player'] += 1
-            continue
+        # 确保player是整数
+        if isinstance(player, (list, tuple, np.ndarray)):
+            player = player[0] if len(player) > 0 else BLACK
+        player = int(player) if player is not None else BLACK
         
+        # 检查动作合法性
         legals = get_legal_moves(board)
         if action not in legals:
-            issues.append(f"样本 #{idx} ({scene_type}): 动作 {pos_to_str(action)} 不合法")
             stats['illegal_action'] += 1
+            if delete:
+                deleted_count += 1
+                print(f"  🗑️ 删除样本 #{idx}: 动作 {pos_to_str(action)} 不合法")
+            elif fix:
+                print(f"  ⚠️ 样本 #{idx} 动作不合法，无法修复")
+                cleaned_data.append(item)
+            else:
+                cleaned_data.append(item)
             continue
         
+        # 创建可修改的副本
+        fixed_item = list(item)
+        need_fix = False
+        
+        # ============ 关键修复：mixed 场景 ============
+        if scene_type == 'mixed':
+            winning = [i for i, v in enumerate(greed_label) if v > 0] if greed_label is not None else []
+            threats = [i for i, v in enumerate(fear_label) if v > 0] if fear_label is not None else []
+            
+            # 找出既是赢点又是防点的位置
+            both = [p for p in winning if p in threats]
+            pure_winning = [p for p in winning if p not in both]
+            pure_threats = [p for p in threats if p not in both]
+            
+            # 统计
+            stats['mixed_both'] += len(both)
+            stats['mixed_pure_winning'] += len(pure_winning)
+            stats['mixed_pure_threats'] += len(pure_threats)
+            
+            # 1. 如果有 both 位置，必须选 both！
+            if both and action not in both:
+                if fix:
+                    new_action = random.choice(both)
+                    fixed_item[2] = new_action
+                    need_fix = True
+                    fixed_count += 1
+                    print(f"  ✅ 修复 mixed #{idx}: 存在必争之地，动作从 {pos_to_str(action)} 改为 {pos_to_str(new_action)}")
+                elif delete:
+                    deleted_count += 1
+                    print(f"  🗑️ 删除 mixed #{idx}: 存在必争之地却选其他")
+                    continue
+                else:
+                    stats['mixed_wrong_action'] += 1
+                    print(f"  📊 分析: mixed #{idx} 存在必之地却选 {pos_to_str(action)}")
+            
+            # 2. 如果没有 both，但有纯赢点，必须选纯赢点
+            elif pure_winning and action in pure_threats:
+                if fix:
+                    new_action = random.choice(pure_winning)
+                    fixed_item[2] = new_action
+                    need_fix = True
+                    fixed_count += 1
+                    print(f"  ✅ 修复 mixed #{idx}: 有赢点却选防守，改为 {pos_to_str(new_action)}")
+                elif delete:
+                    deleted_count += 1
+                    print(f"  🗑️ 删除 mixed #{idx}: 有赢点却选防守")
+                    continue
+                else:
+                    stats['mixed_wrong_action'] += 1
+                    print(f"  📊 分析: mixed #{idx} 有赢点却选防守点 {pos_to_str(action)}")
+            
+            # 3. 只有防点的情况（正常）
+            elif not pure_winning and not both and action in pure_threats:
+                # 这是正确的，什么也不做
+                pass
+        
+        # ============ 检查恐惧标签 ============
         if scene_type in ['fear', 'mixed'] and fear_label is not None:
             fear_positions = [i for i, v in enumerate(fear_label) if v > 0]
-            valid_fears = []
-            invalid_fears = []
+            valid_fears = [p for p in fear_positions if is_real_threat(board, player, p)]
+            invalid_fears = [p for p in fear_positions if p not in valid_fears]
             
-            for pos in fear_positions:
-                if is_real_threat(board, player, pos):
-                    valid_fears.append(pos)
-                else:
-                    invalid_fears.append(pos)
+            stats['valid_fear'] += len(valid_fears)
+            stats['invalid_fear'] += len(invalid_fears)
             
             if invalid_fears:
-                issues.append(f"样本 #{idx} ({scene_type}): 恐惧标记 {[pos_to_str(p) for p in invalid_fears]} 无效")
-                stats['invalid_fear'] += len(invalid_fears)
-            
-            if valid_fears:
-                stats['valid_fear'] += len(valid_fears)
-        
-        if scene_type in ['greed', 'mixed'] and greed_label is not None:
-            greed_positions = [i for i, v in enumerate(greed_label) if v > 0]
-            valid_greed = []
-            invalid_greed = []
-            
-            for pos in greed_positions:
-                if is_real_winning_move(board, player, pos):
-                    valid_greed.append(pos)
-                else:
-                    invalid_greed.append(pos)
-            
-            if invalid_greed:
-                issues.append(f"样本 #{idx} ({scene_type}): 贪婪标记 {[pos_to_str(p) for p in invalid_greed]} 无效")
-                stats['invalid_greed'] += len(invalid_greed)
-            
-            if valid_greed:
-                stats['valid_greed'] += len(valid_greed)
-        
-        stats[scene_type] += 1
-        stats[f'player_{player}'] += 1
-    
-    print("\n📊 数据集统计:")
-    print(f"   恐惧场景: {stats['fear']}")
-    print(f"   贪婪场景: {stats['greed']}")
-    print(f"   混合场景: {stats['mixed']}")
-    print(f"   普通场景: {stats['normal']}")
-    
-    print(f"\n👥 玩家分布:")
-    print(f"   黑棋回合: {stats['player_1']}")
-    print(f"   白棋回合: {stats['player_2']}")
-    
-    print(f"\n🏷️ 标记质量:")
-    print(f"   有效恐惧标记: {stats['valid_fear']}")
-    print(f"   无效恐惧标记: {stats['invalid_fear']}")
-    print(f"   有效贪婪标记: {stats['valid_greed']}")
-    print(f"   无效贪婪标记: {stats['invalid_greed']}")
-    
-    if stats['illegal_action'] > 0:
-        print(f"\n❌ 非法动作: {stats['illegal_action']} 个")
-    
-    if stats['invalid_player'] > 0:
-        print(f"❌ 无效玩家: {stats['invalid_player']} 个")
-    
-    if issues:
-        print(f"\n⚠️ 发现 {len(issues)} 个问题:")
-        for issue in issues[:20]:
-            print(f"   {issue}")
-        if len(issues) > 20:
-            print(f"   ... 还有 {len(issues)-20} 个问题")
-    else:
-        print("\n✅ 没有发现问题，数据质量良好！")
-    
-    if delete and issues:
-        print(f"\n🗑️ 删除模式已开启...")
-        
-        cleaned_data = []
-        deleted_count = 0
-        fixed_count = 0
-        
-        for idx, item in enumerate(data):
-            if len(item) < 7:
-                deleted_count += 1
-                continue
-                
-            board, player, action, value, fear_label, greed_label, scene_type = item[:7]
-            
-            if player not in [BLACK, WHITE]:
-                deleted_count += 1
-                continue
-            
-            legals = get_legal_moves(board)
-            if action not in legals:
-                deleted_count += 1
-                continue
-            
-            fixed_item = list(item)
-            need_fix = False
-            
-            if scene_type in ['fear', 'mixed'] and fear_label is not None:
-                fear_positions = [i for i, v in enumerate(fear_label) if v > 0]
-                valid_fears = [p for p in fear_positions if is_real_threat(board, player, p)]
-                
-                if len(valid_fears) < len(fear_positions):
+                if fix:
+                    # 修复无效的恐惧标签
                     new_fear = [0.0] * BOARD_POSITIONS
                     for pos in valid_fears:
                         new_fear[pos] = 1.0
                     fixed_item[4] = new_fear
                     need_fix = True
+                    print(f"  🔧 修复恐惧标签 {idx}: 移除 {len(invalid_fears)} 个无效标记")
+                elif delete:
+                    # 删除模式，但这里不直接删除，后面会判断
+                    pass
+                else:
+                    stats['invalid_fear_samples'] += 1
+                    print(f"  📊 分析: #{idx} 有 {len(invalid_fears)} 个无效恐惧标记")
+        
+        # ============ 检查贪婪标签 ============
+        if scene_type in ['greed', 'mixed'] and greed_label is not None:
+            greed_positions = [i for i, v in enumerate(greed_label) if v > 0]
+            valid_greed = [p for p in greed_positions if is_real_winning_move(board, player, p)]
+            invalid_greed = [p for p in greed_positions if p not in valid_greed]
             
-            if scene_type in ['greed', 'mixed'] and greed_label is not None:
-                greed_positions = [i for i, v in enumerate(greed_label) if v > 0]
-                valid_greed = [p for p in greed_positions if is_real_winning_move(board, player, p)]
-                
-                if len(valid_greed) < len(greed_positions):
+            stats['valid_greed'] += len(valid_greed)
+            stats['invalid_greed'] += len(invalid_greed)
+            
+            if invalid_greed:
+                if fix:
+                    # 修复无效的贪婪标签
                     new_greed = [0.0] * BOARD_POSITIONS
                     for pos in valid_greed:
                         new_greed[pos] = 1.0
                     fixed_item[5] = new_greed
                     need_fix = True
-            
-            if scene_type == 'fear' and fixed_item[4] is not None and sum(fixed_item[4]) == 0:
-                deleted_count += 1
-                continue
-            if scene_type == 'greed' and fixed_item[5] is not None and sum(fixed_item[5]) == 0:
-                deleted_count += 1
-                continue
-            
-            if need_fix:
-                cleaned_data.append(tuple(fixed_item))
-                fixed_count += 1
-            else:
-                cleaned_data.append(item)
+                    print(f"  🔧 修复贪婪标签 {idx}: 移除 {len(invalid_greed)} 个无效标记")
+                elif delete:
+                    # 删除模式，但这里不直接删除，后面会判断
+                    pass
+                else:
+                    stats['invalid_greed_samples'] += 1
+                    print(f"  📊 分析: #{idx} 有 {len(invalid_greed)} 个无效贪婪标记")
         
-        print(f"   删除了 {deleted_count} 个无效样本")
-        print(f"   修复了 {fixed_count} 个样本的标记")
-        print(f"   剩余 {len(cleaned_data)} 个样本")
+        # 如果场景类型是 fear/greed 但修复后没有有效标记，则删除
+        if scene_type == 'fear' and fixed_item[4] is not None and sum(fixed_item[4]) == 0:
+            if delete:
+                deleted_count += 1
+                print(f"  🗑️ 删除 fear 样本 #{idx}: 无有效恐惧标记")
+                continue
+            elif fix:
+                print(f"  ⚠️ fear #{idx} 无有效恐惧标记，无法修复")
         
+        if scene_type == 'greed' and fixed_item[5] is not None and sum(fixed_item[5]) == 0:
+            if delete:
+                deleted_count += 1
+                print(f"  🗑️ 删除 greed 样本 #{idx}: 无有效贪婪标记")
+                continue
+            elif fix:
+                print(f"  ⚠️ greed #{idx} 无有效贪婪标记，无法修复")
+        
+        # 保存处理后的样本
+        if need_fix:
+            cleaned_data.append(tuple(fixed_item))
+        else:
+            cleaned_data.append(item)
+        
+        stats[scene_type] += 1
+    
+    # 打印统计
+    print(f"\n📊 处理结果:")
+    print(f"   保留: {len(cleaned_data)} 条")
+    if fix:
+        print(f"   修复: {fixed_count} 条")
+    if delete:
+        print(f"   删除: {deleted_count} 条")
+    
+    print(f"\n场景分布:")
+    final_counts = defaultdict(int)
+    for item in cleaned_data:
+        if len(item) >= 7:
+            final_counts[item[6]] += 1
+    
+    for stype in ['fear', 'greed', 'mixed', 'normal']:
+        cnt = final_counts.get(stype, 0)
+        print(f"  {stype}: {cnt}")
+    
+    print(f"\n混合场景分析:")
+    print(f"  必争之地(both): {stats['mixed_both']}")
+    print(f"  纯赢点: {stats['mixed_pure_winning']}")
+    print(f"  纯防点: {stats['mixed_pure_threats']}")
+    print(f"  错误动作: {stats['mixed_wrong_action']}")
+    
+    print(f"\n标记质量:")
+    print(f"  有效恐惧标记: {stats['valid_fear']}")
+    print(f"  无效恐惧标记: {stats['invalid_fear']}")
+    print(f"  有效贪婪标记: {stats['valid_greed']}")
+    print(f"  无效贪婪标记: {stats['invalid_greed']}")
+    
+    # 保存
+    if fix or delete:
         output_path = output_file if output_file else input_file
         if output_path == input_file:
             backup = input_file + '.bak'
             shutil.copy2(input_file, backup)
-            print(f"   原文件已备份到: {backup}")
+            print(f"\n📦 原文件已备份: {backup}")
         
         with open(output_path, "wb") as f:
             pickle.dump(cleaned_data, f)
         
         print(f"✅ 已保存到: {output_path}")
+    else:
+        print(f"\n🔍 分析模式: 未修改文件")
     
-    return stats, issues
+    return cleaned_data
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='清理五子棋数据集')
     parser.add_argument('input', default='wuziqi_dataset_real.pkl', nargs='?')
     parser.add_argument('output', nargs='?')
-    parser.add_argument('--delete', action='store_true')
+    parser.add_argument('--fix', action='store_true', help='修复问题样本')
+    parser.add_argument('--del', dest='delete', action='store_true', help='删除问题样本')
+    
     args = parser.parse_args()
     
-    analyze_dataset(args.input, args.output, delete=args.delete)
+    analyze_dataset(args.input, args.output, fix=args.fix, delete=args.delete)

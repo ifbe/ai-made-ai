@@ -68,6 +68,49 @@ def find_best_stage1_model():
     if best_files:
         return max(best_files, key=os.path.getctime)
     
+    """查找stage0的最新模型（按epoch最大）"""
+    # 优先找checkpoint（有epoch信息）
+    checkpoint_files = glob.glob("stage0/wuziqi_stage0_checkpoint_epoch*.pth")
+    if checkpoint_files:
+        best_model = None
+        max_epoch = 0
+        for f in checkpoint_files:
+            try:
+                epoch = int(f.split('epoch')[1].split('.')[0])
+                if epoch > max_epoch:
+                    max_epoch = epoch
+                    best_model = f
+            except:
+                continue
+        if best_model:
+            print(f"   找到Stage0 checkpoint: epoch {max_epoch}")
+            return best_model
+    
+    # 其次找best模型（按准确率）
+    best_files = glob.glob("stage0/wuziqi_stage0_best_*.pth")
+    if best_files:
+        # 按准确率排序，取最高的
+        best_model = None
+        best_acc = 0
+        for f in best_files:
+            try:
+                acc_str = f.split('best_')[1].split('%')[0]
+                acc = float(acc_str)
+                if acc > best_acc:
+                    best_acc = acc
+                    best_model = f
+            except:
+                continue
+        if best_model:
+            print(f"   找到Stage0 best模型: 准确率 {best_acc}%")
+            return best_model
+    
+    # 最后找final
+    final_file = "stage0/wuziqi_stage0_final.pth"
+    if os.path.exists(final_file):
+        print(f"   找到Stage0 final模型")
+        return final_file
+    
     return None
 
 def find_latest_checkpoint():
@@ -394,7 +437,7 @@ class Stage2SelfPlayTrainer:
         entropy_bonus = 0.0002 * entropy
         
         total_loss = policy_loss + 0.5 * value_loss - entropy_bonus
-        total_loss = torch.clamp(total_loss, min=0.01)
+        #total_loss = torch.clamp(total_loss, min=0.0)
         
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -535,7 +578,8 @@ def main():
         
         print(f"\nEpoch {epoch:3d} | Loss: {train_stats.get('total_loss', 0):.4f}")
         
-        trainer.save_checkpoint(epoch, f"wuziqi_stage2_checkpoint_epoch{epoch}.pth")
+        if epoch % 10 == 0:
+            trainer.save_checkpoint(epoch, f"wuziqi_stage2_checkpoint_epoch{epoch}.pth")
         trainer.scheduler.step()
     
     torch.save(model.cpu().state_dict(), "stage2/wuziqi_stage2_final.pth")

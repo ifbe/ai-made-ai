@@ -223,7 +223,7 @@ def generate_mixed_scenarios_bulk(num_scenarios=10000):
                     greed_label[pos] = 1.0
                 
                 # 优先选能赢的位置
-                action = random.choice(real_wins) if random.random() < 0.7 else random.choice(real_threats)
+                action = random.choice(real_wins)
                 board_value = value if value is not None else 0
                 
                 # 新格式: board, player, action, value, fear_label, greed_label, scene_type
