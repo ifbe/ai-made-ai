@@ -1,9 +1,7 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))  # 当前脚本所在目录
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# generate.py
-# generate.py
 import pickle
 import random
 import numpy as np
@@ -53,6 +51,47 @@ def find_real_threats(board, player):
             threats.append(pos)
     return threats
 
+def has_four_in_row(board, player, pos):
+    """检查下在pos后是否形成4连（允许更多，但不能5连）"""
+    if board[pos] != EMPTY:
+        return False
+    
+    directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+    r, c = pos // BOARD_SIZE, pos % BOARD_SIZE
+    
+    for dr, dc in directions:
+        count = 1  # 当前下的子
+        
+        # 正方向
+        for step in range(1, 5):
+            nr, nc = r + dr * step, c + dc * step
+            if nr < 0 or nr >= BOARD_SIZE or nc < 0 or nc >= BOARD_SIZE:
+                break
+            idx = nr * BOARD_SIZE + nc
+            if board[idx] == player:
+                count += 1
+            else:
+                break
+        
+        # 反方向
+        for step in range(1, 5):
+            nr, nc = r - dr * step, c - dc * step
+            if nr < 0 or nr >= BOARD_SIZE or nc < 0 or nc >= BOARD_SIZE:
+                break
+            idx = nr * BOARD_SIZE + nc
+            if board[idx] == player:
+                count += 1
+            else:
+                break
+        
+        # 改为 count >= 4
+        if count >= 4:
+            # 还要检查是否5连
+            # 简单处理：如果正好5连，也算（但实际不会，因为没下满）
+            return True
+    
+    return False
+
 # ============ 棋盘生成 ============
 
 def generate_board_with_moves(num_moves_range=(15, 25)):
@@ -90,13 +129,13 @@ def generate_board_with_moves(num_moves_range=(15, 25)):
 
 # ============ 场景生成 ============
 
-def generate_fear_scenarios_bulk(num_scenarios=15000):
-    """生成恐惧场景 - 只标记对手真正能赢的位置"""
+def generate_winning_scenarios_bulk(num_scenarios=100):
+    """生成winning场景 - 当前回合，我直接能赢（旧greed算法）"""
     if num_scenarios <= 0:
         return []
     
     scenarios = []
-    print(f"   目标: {num_scenarios} 个恐惧场景")
+    print(f"   目标: {num_scenarios} 个winning场景")
     
     last_print = 0
     attempts = 0
@@ -108,60 +147,8 @@ def generate_fear_scenarios_bulk(num_scenarios=15000):
         if len(moves_history) > 10:
             idx = random.randint(5, len(moves_history)-3)
             board, _, value = moves_history[idx]
-            current_player = BLACK if idx % 2 == 0 else WHITE  # 1或2
+            current_player = BLACK if idx % 2 == 0 else WHITE
             
-            # 严格查找对手能赢的位置
-            real_threats = find_real_threats(board, current_player)
-            
-            # 只有确实有威胁才生成
-            if len(real_threats) >= 1:
-                fear_label = [0.0] * BOARD_POSITIONS
-                for pos in real_threats:
-                    fear_label[pos] = 1.0
-                
-                action = random.choice(real_threats)
-                board_value = value if value is not None else 0
-                
-                # 新格式: board, player, action, value, fear_label, greed_label, scene_type
-                # player直接存 1 或 2
-                scenarios.append((
-                    board.copy(),
-                    current_player,
-                    action,
-                    board_value,
-                    fear_label,
-                    None,
-                    'fear'
-                ))
-        
-        if len(scenarios) - last_print >= 100 and len(scenarios) > 0:
-            print(f"      ✓ 已生成 {len(scenarios)}/{num_scenarios} 恐惧场景 (尝试次数: {attempts})")
-            last_print = len(scenarios)
-    
-    print(f"      ✅ 恐惧场景完成，生成 {len(scenarios)} 个，成功率: {len(scenarios)/attempts*100:.1f}%")
-    return scenarios
-
-def generate_greed_scenarios_bulk(num_scenarios=15000):
-    """生成贪婪场景 - 只标记自己能真正赢的位置"""
-    if num_scenarios <= 0:
-        return []
-    
-    scenarios = []
-    print(f"   目标: {num_scenarios} 个贪婪场景")
-    
-    last_print = 0
-    attempts = 0
-    
-    while len(scenarios) < num_scenarios:
-        attempts += 1
-        moves_history, winner = generate_board_with_moves((15, 25))
-        
-        if len(moves_history) > 10:
-            idx = random.randint(5, len(moves_history)-3)
-            board, _, value = moves_history[idx]
-            current_player = BLACK if idx % 2 == 0 else WHITE  # 1或2
-            
-            # 严格查找自己能赢的位置
             real_wins = find_real_winning_moves(board, current_player)
             
             if len(real_wins) >= 1:
@@ -172,7 +159,6 @@ def generate_greed_scenarios_bulk(num_scenarios=15000):
                 action = random.choice(real_wins)
                 board_value = value if value is not None else 0
                 
-                # 新格式: board, player, action, value, fear_label, greed_label, scene_type
                 scenarios.append((
                     board.copy(),
                     current_player,
@@ -180,17 +166,246 @@ def generate_greed_scenarios_bulk(num_scenarios=15000):
                     board_value,
                     None,
                     greed_label,
-                    'greed'
+                    'winning'
                 ))
         
-        if len(scenarios) - last_print >= 100 and len(scenarios) > 0:
-            print(f"      ✓ 已生成 {len(scenarios)}/{num_scenarios} 贪婪场景 (尝试次数: {attempts})")
+        if len(scenarios) - last_print >= 1 and len(scenarios) > 0:
+            print(f"      ✓ 已生成 {len(scenarios)}/{num_scenarios} winning场景 (尝试次数: {attempts})")
             last_print = len(scenarios)
     
-    print(f"      ✅ 贪婪场景完成，生成 {len(scenarios)} 个，成功率: {len(scenarios)/attempts*100:.1f}%")
+    print(f"      ✅ winning场景完成，生成 {len(scenarios)} 个，成功率: {len(scenarios)/attempts*100:.1f}%")
     return scenarios
 
-def generate_mixed_scenarios_bulk(num_scenarios=10000):
+def generate_losing_scenarios_bulk(num_scenarios=100):
+    """生成losing场景 - 当前回合，对手直接能赢（旧fear算法）"""
+    if num_scenarios <= 0:
+        return []
+    
+    scenarios = []
+    print(f"   目标: {num_scenarios} 个losing场景")
+    
+    last_print = 0
+    attempts = 0
+    
+    while len(scenarios) < num_scenarios:
+        attempts += 1
+        moves_history, winner = generate_board_with_moves((15, 25))
+        
+        if len(moves_history) > 10:
+            idx = random.randint(5, len(moves_history)-3)
+            board, _, value = moves_history[idx]
+            current_player = BLACK if idx % 2 == 0 else WHITE
+            
+            real_threats = find_real_threats(board, current_player)
+            
+            if len(real_threats) >= 1:
+                fear_label = [0.0] * BOARD_POSITIONS
+                for pos in real_threats:
+                    fear_label[pos] = 1.0
+                
+                action = random.choice(real_threats)
+                board_value = value if value is not None else 0
+                
+                scenarios.append((
+                    board.copy(),
+                    current_player,
+                    action,
+                    board_value,
+                    fear_label,
+                    None,
+                    'losing'
+                ))
+        
+        if len(scenarios) - last_print >= 1 and len(scenarios) > 0:
+            print(f"      ✓ 已生成 {len(scenarios)}/{num_scenarios} losing场景 (尝试次数: {attempts})")
+            last_print = len(scenarios)
+    
+    print(f"      ✅ losing场景完成，生成 {len(scenarios)} 个，成功率: {len(scenarios)/attempts*100:.1f}%")
+    return scenarios
+
+def generate_fear_scenarios_bulk(num_scenarios=100):
+    """生成fear场景 - 对手形成4连（必败势）"""
+    if num_scenarios <= 0:
+        return []
+    
+    scenarios = []
+    print(f"   目标: {num_scenarios} 个fear场景(对手形成4连)")
+    
+    last_print = 0
+    attempts = 0
+    
+    # 预定义一些5连模式（相对位置，便于平移）
+    five_patterns = [
+        # 横线5连
+        [(0,0), (0,1), (0,2), (0,3), (0,4)],
+        # 竖线5连
+        [(0,0), (1,0), (2,0), (3,0), (4,0)],
+        # 对角线5连
+        [(0,0), (1,1), (2,2), (3,3), (4,4)],
+        # 反斜线5连
+        [(0,4), (1,3), (2,2), (3,1), (4,0)],
+    ]
+    
+    while len(scenarios) < num_scenarios:
+        attempts += 1
+        
+        # 1. 随机选择当前玩家（黑或白）
+        current_player = random.choice([BLACK, WHITE])
+        opponent = 3 - current_player
+        
+        # 2. 随机选择一个5连模式（对手的5连）
+        pattern = random.choice(five_patterns)
+        
+        # 3. 随机平移（确保在棋盘内）
+        max_r = BOARD_SIZE - 5
+        max_c = BOARD_SIZE - 5
+        offset_r = random.randint(0, max_r)
+        offset_c = random.randint(0, max_c)
+        
+        # 4. 放5个对手的子
+        board = [EMPTY] * BOARD_POSITIONS
+        five_positions = []
+        for dr, dc in pattern:
+            r = offset_r + dr
+            c = offset_c + dc
+            pos = r * BOARD_SIZE + c
+            board[pos] = opponent
+            five_positions.append(pos)
+        
+        # 5. 随机放3个当前玩家的子干扰（但不能放在5连位置上）
+        num_player = 3
+        player_positions = []
+        for _ in range(num_player):
+            while True:
+                pos = random.randint(0, BOARD_POSITIONS-1)
+                if board[pos] == EMPTY and pos not in five_positions:
+                    board[pos] = current_player
+                    player_positions.append(pos)
+                    break
+        
+        # 6. 去掉对手两端的2个子（留下中间3个形成4连威胁）
+        # 去掉第一个和最后一个
+        fear_pos1 = five_positions[0]  # 第一个
+        fear_pos2 = five_positions[4]  # 最后一个
+        board[fear_pos1] = EMPTY
+        board[fear_pos2] = EMPTY
+        
+        # 7. 这两个位置就是恐惧点（对手下这里能形成4连）
+        fear_label = [0.0] * BOARD_POSITIONS
+        fear_label[fear_pos1] = 1.0
+        fear_label[fear_pos2] = 1.0
+        
+        # 8. 随机选择一个恐惧点作为动作
+        action = random.choice([fear_pos1, fear_pos2])
+        
+        scenarios.append((
+            board.copy(),
+            current_player,
+            action,
+            0,
+            fear_label,
+            None,
+            'fear'
+        ))
+        
+        if len(scenarios) - last_print >= 10 and len(scenarios) > 0:
+            print(f"      ✓ 已生成 {len(scenarios)}/{num_scenarios} fear场景 (尝试次数: {attempts})")
+            last_print = len(scenarios)
+    
+    print(f"      ✅ fear场景完成，生成 {len(scenarios)} 个，成功率: {len(scenarios)/attempts*100:.1f}%")
+    return scenarios
+
+def generate_greed_scenarios_bulk(num_scenarios=100):
+    """生成greed场景 - 形成4连（必胜势）"""
+    if num_scenarios <= 0:
+        return []
+    
+    scenarios = []
+    print(f"   目标: {num_scenarios} 个greed场景(形成4连)")
+    
+    last_print = 0
+    attempts = 0
+    
+    # 预定义一些5连模式（相对位置，便于平移）
+    five_patterns = [
+        # 横线5连
+        [(0,0), (0,1), (0,2), (0,3), (0,4)],
+        # 竖线5连
+        [(0,0), (1,0), (2,0), (3,0), (4,0)],
+        # 对角线5连
+        [(0,0), (1,1), (2,2), (3,3), (4,4)],
+        # 反斜线5连
+        [(0,4), (1,3), (2,2), (3,1), (4,0)],
+    ]
+    
+    while len(scenarios) < num_scenarios:
+        attempts += 1
+        
+        # 1. 随机选择当前玩家（黑或白）
+        current_player = random.choice([BLACK, WHITE])
+        opponent = 3 - current_player
+        
+        # 2. 随机选择一个5连模式
+        pattern = random.choice(five_patterns)
+        
+        # 3. 随机平移（确保在棋盘内）
+        max_r = BOARD_SIZE - 5
+        max_c = BOARD_SIZE - 5
+        offset_r = random.randint(0, max_r)
+        offset_c = random.randint(0, max_c)
+        
+        # 4. 放5个当前玩家的子（形成5连）
+        board = [EMPTY] * BOARD_POSITIONS
+        five_positions = []
+        for dr, dc in pattern:
+            r = offset_r + dr
+            c = offset_c + dc
+            pos = r * BOARD_SIZE + c
+            board[pos] = current_player
+            five_positions.append(pos)
+        
+        # 5. 随机放3个对手的子干扰
+        num_opponent = 3
+        for _ in range(num_opponent):
+            while True:
+                pos = random.randint(0, BOARD_POSITIONS-1)
+                if board[pos] == EMPTY:
+                    board[pos] = opponent
+                    break
+        
+        # 6. 去掉5连的两端（留下中间3个）
+        # 两端的位置被移除，变成空位
+        remove_pos1 = five_positions[0]  # 第一个
+        remove_pos2 = five_positions[4]  # 最后一个
+        board[remove_pos1] = EMPTY
+        board[remove_pos2] = EMPTY
+        
+        # 7. 这两个空位就是贪婪点（下这里能形成4连）
+        greed_label = [0.0] * BOARD_POSITIONS
+        greed_label[remove_pos1] = 1.0
+        greed_label[remove_pos2] = 1.0
+        
+        # 8. 随机选一个作为动作
+        action = random.choice([remove_pos1, remove_pos2])
+        
+        scenarios.append((
+            board.copy(),
+            current_player,
+            action,
+            0,
+            None,
+            greed_label,
+            'greed'
+        ))
+        
+        if len(scenarios) - last_print >= 10 and len(scenarios) > 0:
+            print(f"      ✓ 已生成 {len(scenarios)}/{num_scenarios} greed场景 (尝试次数: {attempts})")
+            last_print = len(scenarios)
+    
+    print(f"      ✅ greed场景完成，生成 {len(scenarios)} 个，成功率: {len(scenarios)/attempts*100:.1f}%")
+    return scenarios
+
+def generate_mixed_scenarios_bulk(num_scenarios=100):
     """生成混合场景 - 同时有自己能赢和对手能赢的位置"""
     if num_scenarios <= 0:
         return []
@@ -208,7 +423,7 @@ def generate_mixed_scenarios_bulk(num_scenarios=10000):
         if len(moves_history) > 15:
             idx = random.randint(8, len(moves_history)-5)
             board, _, value = moves_history[idx]
-            current_player = BLACK if idx % 2 == 0 else WHITE  # 1或2
+            current_player = BLACK if idx % 2 == 0 else WHITE
             
             real_wins = find_real_winning_moves(board, current_player)
             real_threats = find_real_threats(board, current_player)
@@ -222,11 +437,9 @@ def generate_mixed_scenarios_bulk(num_scenarios=10000):
                 for pos in real_wins:
                     greed_label[pos] = 1.0
                 
-                # 优先选能赢的位置
                 action = random.choice(real_wins)
                 board_value = value if value is not None else 0
                 
-                # 新格式: board, player, action, value, fear_label, greed_label, scene_type
                 scenarios.append((
                     board.copy(),
                     current_player,
@@ -237,14 +450,14 @@ def generate_mixed_scenarios_bulk(num_scenarios=10000):
                     'mixed'
                 ))
         
-        if len(scenarios) - last_print >= 100 and len(scenarios) > 0:
+        if len(scenarios) - last_print >= 1 and len(scenarios) > 0:
             print(f"      ✓ 已生成 {len(scenarios)}/{num_scenarios} 混合场景 (尝试次数: {attempts})")
             last_print = len(scenarios)
     
     print(f"      ✅ 混合场景完成，生成 {len(scenarios)} 个，成功率: {len(scenarios)/attempts*100:.1f}%")
     return scenarios
 
-def generate_normal_scenarios_bulk(num_scenarios=20000):
+def generate_normal_scenarios_bulk(num_scenarios=0):
     """生成普通场景 - 没有任何直接获胜位置"""
     if num_scenarios <= 0:
         return []
@@ -261,14 +474,12 @@ def generate_normal_scenarios_bulk(num_scenarios=20000):
         
         for idx, (board, action, value) in enumerate(moves_history):
             if random.random() < 0.3 and idx > 2 and idx < len(moves_history) - 2:
-                current_player = BLACK if idx % 2 == 0 else WHITE  # 1或2
+                current_player = BLACK if idx % 2 == 0 else WHITE
                 
-                # 确保没有任何直接获胜位置
                 real_wins = find_real_winning_moves(board, current_player)
                 real_threats = find_real_threats(board, current_player)
                 
                 if len(real_wins) == 0 and len(real_threats) == 0:
-                    # 新格式: board, player, action, value, fear_label, greed_label, scene_type
                     scenarios.append((
                         board.copy(),
                         current_player,
@@ -279,7 +490,7 @@ def generate_normal_scenarios_bulk(num_scenarios=20000):
                         'normal'
                     ))
         
-        if len(scenarios) - last_print >= 100 and len(scenarios) > 0:
+        if len(scenarios) - last_print >= 10 and len(scenarios) > 0:
             print(f"      ✓ 已生成 {len(scenarios)}/{num_scenarios} 普通场景")
             last_print = len(scenarios)
     
@@ -297,7 +508,6 @@ def load_existing_data(filename):
         player_counts = {BLACK: 0, WHITE: 0}
         
         for item in data:
-            # 新格式: board, player, action, value, fear_label, greed_label, scene_type
             if len(item) >= 7:
                 _, player, _, _, _, _, scene_type = item[:7]
                 counts[scene_type] += 1
@@ -307,7 +517,7 @@ def load_existing_data(filename):
         if counts:
             print(f"  场景分布:")
             total = len(data)
-            for stype in ['fear', 'greed', 'mixed', 'normal']:
+            for stype in ['winning', 'losing', 'greed', 'fear', 'mixed', 'normal']:
                 cnt = counts.get(stype, 0)
                 pct = cnt/total*100 if total > 0 else 0
                 print(f"    {stype:>6}: {cnt:6} ({pct:5.1f}%)")
@@ -320,15 +530,17 @@ def load_existing_data(filename):
     return [], defaultdict(int)
 
 def generate_large_dataset(
-    num_fear=15000,
-    num_greed=15000,
-    num_mixed=10000,
-    num_normal=20000,
+    num_winning=100,
+    num_losing=100,
+    num_greed=100,
+    num_fear=100,
+    num_mixed=100,
+    num_normal=0,
     output_file="wuziqi_dataset_real.pkl",
     mode="continue"
 ):
     print("=" * 70)
-    print("🚀 五子棋数据集生成器")
+    print("🚀 五子棋数据集生成器 (6场景快速版)")
     print("=" * 70)
     
     existing_data = []
@@ -340,18 +552,22 @@ def generate_large_dataset(
         print(f"新建模式: 将生成全新数据集")
     
     # 分别计算每种场景还需要多少
-    fear_needed = max(0, num_fear - existing_counts.get('fear', 0))
+    winning_needed = max(0, num_winning - existing_counts.get('winning', 0))
+    losing_needed = max(0, num_losing - existing_counts.get('losing', 0))
     greed_needed = max(0, num_greed - existing_counts.get('greed', 0))
+    fear_needed = max(0, num_fear - existing_counts.get('fear', 0))
     mixed_needed = max(0, num_mixed - existing_counts.get('mixed', 0))
     normal_needed = max(0, num_normal - existing_counts.get('normal', 0))
     
-    total_needed = fear_needed + greed_needed + mixed_needed + normal_needed
+    total_needed = winning_needed + losing_needed + greed_needed + fear_needed + mixed_needed + normal_needed
     
     print(f"\n还需要生成:")
-    print(f"   恐惧: {fear_needed}")
-    print(f"   贪婪: {greed_needed}")
-    print(f"   混合: {mixed_needed}")
-    print(f"   普通: {normal_needed}")
+    print(f"   winning(直接赢): {winning_needed}")
+    print(f"   losing(直接输): {losing_needed}")
+    print(f"   greed(形成4连): {greed_needed}")
+    print(f"   fear(对手4连): {fear_needed}")
+    print(f"   mixed: {mixed_needed}")
+    print(f"   normal: {normal_needed}")
     print(f"   总计: {total_needed}")
     
     if total_needed <= 0:
@@ -360,25 +576,37 @@ def generate_large_dataset(
     
     all_data = existing_data if mode == "continue" else []
     
-    print(f"\n[1/4] 生成恐惧场景...")
+    print(f"\n[1/6] 生成winning场景(直接赢)...")
     start_time = time.time()
-    fear = generate_fear_scenarios_bulk(fear_needed)
-    all_data.extend(fear)
-    print(f"   ⏱️ 恐惧场景耗时: {time.time()-start_time:.1f}秒")
+    winning = generate_winning_scenarios_bulk(winning_needed)
+    all_data.extend(winning)
+    print(f"   ⏱️ winning场景耗时: {time.time()-start_time:.1f}秒")
     
-    print(f"\n[2/4] 生成贪婪场景...")
+    print(f"\n[2/6] 生成losing场景(直接输)...")
+    start_time = time.time()
+    losing = generate_losing_scenarios_bulk(losing_needed)
+    all_data.extend(losing)
+    print(f"   ⏱️ losing场景耗时: {time.time()-start_time:.1f}秒")
+    
+    print(f"\n[3/6] 生成greed场景(形成4连)...")
     start_time = time.time()
     greed = generate_greed_scenarios_bulk(greed_needed)
     all_data.extend(greed)
-    print(f"   ⏱️ 贪婪场景耗时: {time.time()-start_time:.1f}秒")
+    print(f"   ⏱️ greed场景耗时: {time.time()-start_time:.1f}秒")
     
-    print(f"\n[3/4] 生成混合场景...")
+    print(f"\n[4/6] 生成fear场景(对手4连)...")
+    start_time = time.time()
+    fear = generate_fear_scenarios_bulk(fear_needed)
+    all_data.extend(fear)
+    print(f"   ⏱️ fear场景耗时: {time.time()-start_time:.1f}秒")
+    
+    print(f"\n[5/6] 生成混合场景...")
     start_time = time.time()
     mixed = generate_mixed_scenarios_bulk(mixed_needed)
     all_data.extend(mixed)
     print(f"   ⏱️ 混合场景耗时: {time.time()-start_time:.1f}秒")
     
-    print(f"\n[4/4] 生成普通场景...")
+    print(f"\n[6/6] 生成普通场景...")
     start_time = time.time()
     normal = generate_normal_scenarios_bulk(normal_needed)
     all_data.extend(normal)
@@ -405,7 +633,7 @@ def generate_large_dataset(
         if greed_label is not None:
             greed_with_label += 1
     
-    for stype in ['fear', 'greed', 'mixed', 'normal']:
+    for stype in ['winning', 'losing', 'greed', 'fear', 'mixed', 'normal']:
         cnt = final_counts.get(stype, 0)
         pct = cnt/len(all_data)*100 if len(all_data) > 0 else 0
         print(f"   {stype:>6}: {cnt:6} ({pct:5.1f}%)")
@@ -426,22 +654,26 @@ def generate_large_dataset(
     return all_data
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='五子棋数据集生成器')
+    parser = argparse.ArgumentParser(description='五子棋数据集生成器 (6场景快速版)')
     parser.add_argument('--new', action='store_true', help='重新生成数据集')
     parser.add_argument('--continue', '-c', dest='continue_mode', action='store_true', help='继续添加')
     parser.add_argument('--output', '-o', type=str, default='wuziqi_dataset_real.pkl', help='输出文件')
-    parser.add_argument('--fear', type=int, default=100, help='恐惧场景目标')
-    parser.add_argument('--greed', type=int, default=100, help='贪婪场景目标')
-    parser.add_argument('--mixed', type=int, default=100, help='混合场景目标')
-    parser.add_argument('--normal', type=int, default=100, help='普通场景目标')
+    parser.add_argument('--winning', type=int, default=100, help='winning场景(直接赢)')
+    parser.add_argument('--losing', type=int, default=100, help='losing场景(直接输)')
+    parser.add_argument('--greed', type=int, default=100, help='greed场景(形成4连)')
+    parser.add_argument('--fear', type=int, default=100, help='fear场景(对手4连)')
+    parser.add_argument('--mixed', type=int, default=100, help='混合场景')
+    parser.add_argument('--normal', type=int, default=0, help='普通场景')
     
     args = parser.parse_args()
     mode = "new" if args.new else "continue"
     
     start = time.time()
     generate_large_dataset(
-        num_fear=args.fear,
+        num_winning=args.winning,
+        num_losing=args.losing,
         num_greed=args.greed,
+        num_fear=args.fear,
         num_mixed=args.mixed,
         num_normal=args.normal,
         output_file=args.output,

@@ -48,23 +48,29 @@ class AttentionFusion(nn.Module):
         return self.fusion(combined)  # [batch, 225, 1]
 
 class FearGreedWuziqiModel(nn.Module):
-    """五子棋恐惧与贪婪模型 - 注意力融合版"""
-    def __init__(self, d_model=128, nhead=4, num_layers=2, dim_feedforward=256, dropout=0.1):
+    """五子棋恐惧与贪婪模型 - state/pos/turn三特征拼接版"""
+    def __init__(self, state_dim=64, pos_dim=32, nhead=8, num_layers=2, dim_feedforward=256, dropout=0.1):
         super().__init__()
         
-        self.d_model = d_model
+        self.state_dim = state_dim      # 棋盘状态维度 64
+        self.pos_dim = pos_dim          # 位置编码维度 32
+        self.turn_dim = 1               # turn信息维度 1
+        self.concat_dim = state_dim + pos_dim + self.turn_dim  # 64+32+1=97
+        
+        # 投影到128维（方便Transformer计算）
+        self.projection = nn.Linear(self.concat_dim, 128)
+        
         self.board_size = BOARD_SIZE
         self.num_positions = BOARD_POSITIONS
         
         # 基础嵌入
-        self.state_embedding = nn.Embedding(3, d_model)
-        self.pos_embedding = nn.Parameter(torch.randn(1, BOARD_POSITIONS, d_model) * 0.02)
-        self.turn_embedding = nn.Embedding(2, d_model)
+        self.state_embedding = nn.Embedding(3, state_dim)  # 64维
+        self.pos_embedding = nn.Parameter(torch.randn(1, BOARD_POSITIONS, pos_dim) * 0.02)  # 32维
         
-        # Transformer Encoder
+        # Transformer Encoder - 处理128维特征
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
+            d_model=128,  # 128维
+            nhead=nhead,   # 8头，128/8=16
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
@@ -72,51 +78,54 @@ class FearGreedWuziqiModel(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         
-        # LayerNorm
-        self.norm = nn.LayerNorm(d_model)
+        # LayerNorm - 128维
+        self.norm = nn.LayerNorm(128)
         
-        # 恐惧头 - 每个位置输出32维特征
+        # 恐惧头 - 输入128维，输出32维
         self.fear_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, d_model // 4),  # 32维
+            nn.Linear(64, 32),
             nn.ReLU(),
         )
         
-        # 贪婪头 - 每个位置输出32维特征
+        # 贪婪头 - 输入128维，输出32维
         self.greed_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, d_model // 4),  # 32维
+            nn.Linear(64, 32),
             nn.ReLU(),
         )
         
-        # 普通策略头 - 每个位置输出32维特征
+        # 普通策略头 - 输入128维，输出32维
         self.normal_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, d_model // 4),  # 32维
+            nn.Linear(64, 32),
             nn.ReLU(),
         )
         
-        # 注意力融合层
+        # 注意力融合层 - feat_dim=32
         self.position_fusion = AttentionFusion(feat_dim=32, d_model=64, dropout=dropout)
         
-        # 价值头（用全局特征）
+        # 价值头 - 输入128维，输出1维
         self.value_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1),
+            nn.Linear(64, 1),
             nn.Tanh()
         )
         
-        # 注意力头（用于可视化）
+        # 注意力头（用于可视化）- 输入128维，输出1维
         self.attention_head = nn.Sequential(
-            nn.Linear(d_model, 1),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
             nn.Sigmoid()
         )
         
@@ -133,39 +142,45 @@ class FearGreedWuziqiModel(nn.Module):
     
     def forward_with_mask(self, board, turn=None, legal_moves=None, return_details=False):
         """
-        带合法移动掩码的前向传播 - 注意力融合版
+        带合法移动掩码的前向传播 - state/pos/turn三特征拼接版
         legal_moves: list of lists, 每个样本的合法位置列表
         """
         batch_size = board.size(0)
         
-        # 基础嵌入
-        emb = self.state_embedding(board) * math.sqrt(self.d_model)
-        emb = emb + self.pos_embedding
+        # 1. 棋盘状态嵌入 [batch,225,64]
+        state_emb = self.state_embedding(board) * math.sqrt(self.state_dim)
         
-        # 加入回合信息
-        if turn is not None:
-            turn_emb = self.turn_embedding(turn).unsqueeze(1).expand(-1, self.num_positions, -1)
-            emb = emb + turn_emb
+        # 2. 位置编码 [batch,225,32]
+        pos_expanded = self.pos_embedding.expand(batch_size, -1, -1)
         
-        # Transformer编码器
-        memory = self.encoder(emb)
-        memory = self.norm(memory)
+        # 3. turn信息 [batch,225,1]
+        turn_expanded = turn.float().view(-1, 1, 1).expand(-1, self.num_positions, 1)
         
-        # 全局特征（用于价值评估）
-        global_feat = memory.mean(dim=1)
+        # 4. 拼接所有特征 [batch,225,97]
+        concat = torch.cat([state_emb, pos_expanded, turn_expanded], dim=-1)
         
-        # 三个头 - 每个位置输出32维特征 [batch, 225, 32]
-        fear_features = self.fear_head(memory)
-        greed_features = self.greed_head(memory)
-        normal_features = self.normal_head(memory)
+        # 5. 投影到128维 [batch,225,128]
+        transformer_input = self.projection(concat)
         
-        # 注意力融合 - 对每个位置独立决策
-        position_scores = self.position_fusion(fear_features, greed_features, normal_features)  # [batch, 225, 1]
+        # 6. Transformer编码器
+        memory = self.encoder(transformer_input)
+        memory = self.norm(memory)  # [batch,225,128]
         
-        # 去掉最后一维，得到 [batch, 225]
+        # 7. 全局特征（用于价值头和注意力头）
+        global_feat = memory.mean(dim=1)  # [batch,128]
+        
+        # 8. 三个头直接从memory取特征
+        fear_features = self.fear_head(memory)      # [batch,225,32]
+        greed_features = self.greed_head(memory)    # [batch,225,32]
+        normal_features = self.normal_head(memory)  # [batch,225,32]
+        
+        # 9. 注意力融合 - 对每个位置独立决策
+        position_scores = self.position_fusion(fear_features, greed_features, normal_features)  # [batch,225,1]
+        
+        # 10. 去掉最后一维，得到 [batch,225]
         policy_logits = position_scores.squeeze(-1)
         
-        # 如果有legal_moves，只计算合法位置的概率
+        # 11. 如果有legal_moves，只计算合法位置的概率
         if legal_moves is not None:
             mask = torch.ones_like(policy_logits) * float('-inf')
             for b in range(batch_size):
@@ -174,17 +189,17 @@ class FearGreedWuziqiModel(nn.Module):
                         mask[b, pos] = 0
             policy_logits = policy_logits + mask
         
-        # 价值评估
-        value = self.value_head(global_feat)
+        # 12. 价值评估
+        value = self.value_head(global_feat)  # [batch,1]
+        
+        # 13. 注意力（可视化）
+        attention = self.attention_head(global_feat)  # [batch,1]
         
         if return_details:
-            # 为了可视化，对特征取平均得到每个位置的分数（并压缩到0-1）
-            # fear_scores = torch.sigmoid(fear_features.mean(dim=-1))      # [batch, 225]
-            # greed_scores = torch.sigmoid(greed_features.mean(dim=-1))    # [batch, 225]
-            # normal_scores = torch.sigmoid(normal_features.mean(dim=-1))  # [batch, 225]
-            fear_scores = fear_features.mean(dim=-1)      # [batch, 225]
-            greed_scores = greed_features.mean(dim=-1)    # [batch, 225]
-            normal_scores = normal_features.mean(dim=-1)  # [batch, 225]
+            # 为了可视化，对特征取平均得到每个位置的分数
+            fear_scores = fear_features.mean(dim=-1)      # [batch,225]
+            greed_scores = greed_features.mean(dim=-1)    # [batch,225]
+            normal_scores = normal_features.mean(dim=-1)  # [batch,225]
             
             return {
                 'policy': policy_logits,
@@ -192,7 +207,7 @@ class FearGreedWuziqiModel(nn.Module):
                 'fear_scores': fear_scores,
                 'greed_scores': greed_scores,
                 'normal_scores': normal_scores,
-                'attention': self.attention_head(global_feat)
+                'attention': attention
             }
         
         return policy_logits, value

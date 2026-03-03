@@ -190,14 +190,14 @@ class Stage0Trainer:
         
         return {'loss': total_loss / batch_count}
     
-    def evaluate_accuracy(self, dataset, num_samples=200):
+    def evaluate_accuracy_old(self, dataset, num_samples=200):
         """只在fear/greed场景上评估"""
         self.model.eval()
         correct = 0
         total = 0
         
         # 筛选fear和greed场景
-        unique_scenes = [d for d in dataset if d['scene_type'] in ['fear', 'greed']]
+        unique_scenes = [d for d in dataset if d['scene_type'] in ['winning', 'losing', 'fear', 'greed']]
         if len(unique_scenes) < num_samples:
             samples = unique_scenes
         else:
@@ -250,6 +250,67 @@ class Stage0Trainer:
                             correct += 1
                     total += 1
         
+        return correct / total if total > 0 else 0
+
+    def evaluate_accuracy(self, dataset, num_samples=200):
+        """评估准确率 - 支持所有唯一场景"""
+        self.model.eval()
+        correct = 0
+        total = 0
+    
+        # 筛选所有唯一场景
+        unique_scenes = [d for d in dataset if d['scene_type'] in ['winning', 'losing', 'fear', 'greed']]
+        if len(unique_scenes) < num_samples:
+            samples = unique_scenes
+        else:
+            samples = random.sample(unique_scenes, num_samples)
+
+        print(f"    评估场景: 唯一场景共 {len(samples)} 个")
+        print(f"      winning/greed: {sum(1 for d in samples if d['scene_type'] in ['winning', 'greed'])}")
+        print(f"      losing/fear: {sum(1 for d in samples if d['scene_type'] in ['losing', 'fear'])}")
+
+        with torch.no_grad():
+            for item in samples:
+                board = item['board']
+                player = item['player']
+                correct_action = item['move']
+                scene_type = item['scene_type']
+                fear_label = item.get('fear_label')
+                greed_label = item.get('greed_label')
+            
+                nearby = get_nearby_moves(board, distance=2)
+                if not nearby:
+                    continue
+                
+                board_tensor = torch.tensor(board, dtype=torch.long, device=self.device).unsqueeze(0)
+                player_tensor = torch.tensor([player], device=self.device)
+            
+                policy_logits, _ = self.model.forward_with_mask(
+                    board_tensor, player_tensor, legal_moves=[nearby]
+                )
+
+                probs = F.softmax(policy_logits[0], dim=-1).cpu().numpy()
+                nearby_probs = [(pos, probs[pos]) for pos in nearby]
+
+                if nearby_probs:
+                    predicted = max(nearby_probs, key=lambda x: x[1])[0]
+
+                    # 1. 优先匹配正确动作
+                    if predicted == correct_action:
+                        correct += 1
+                    # 2. winning/greed场景：选任意赢点都对
+                    elif scene_type in ['winning', 'greed'] and greed_label is not None:
+                        win_positions = [i for i, v in enumerate(greed_label) if v > 0]
+                        if predicted in win_positions:
+                            correct += 1
+                    # 3. losing/fear场景：选任意防点都对
+                    elif scene_type in ['losing', 'fear'] and fear_label is not None:
+                        threat_positions = [i for i, v in enumerate(fear_label) if v > 0]
+                        if predicted in threat_positions:
+                            correct += 1
+                
+                    total += 1
+
         return correct / total if total > 0 else 0
 
 def load_stage0_dataset(filename="wuziqi_dataset_real.pkl"):
@@ -348,10 +409,12 @@ def main():
     
     print("\n[2/3] 初始化模型...")
     model = FearGreedWuziqiModel(
-        d_model=128,
-        nhead=4,
+        state_dim=64,      # 棋盘状态维度
+        pos_dim=32,        # 位置编码维度
+        nhead=8,           # 注意力头数
         num_layers=2,
-        dim_feedforward=256
+        dim_feedforward=256,
+        dropout=0.1
     )
     
     trainer = Stage0Trainer(model, device, lr=args.lr)

@@ -510,10 +510,12 @@ def main():
     
     print("\n[1/3] 初始化模型...")
     model = FearGreedWuziqiModel(
-        d_model=128,
-        nhead=4,
+        state_dim=64,      # 棋盘状态维度
+        pos_dim=32,        # 位置编码维度
+        nhead=8,           # 注意力头数
         num_layers=2,
-        dim_feedforward=256
+        dim_feedforward=256,
+        dropout=0.1
     )
     
     trainer = Stage2SelfPlayTrainer(model, device, lr=1e-5)
