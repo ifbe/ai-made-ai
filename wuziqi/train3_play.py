@@ -343,14 +343,7 @@ def fine_tune_from_game(model, game_data, device, lr=1e-5):
 
 def load_model(model_path, device):
     """加载模型 - 支持普通权重和checkpoint"""
-    model = FearGreedWuziqiModel(
-        state_dim=64,      # 棋盘状态维度
-        pos_dim=32,        # 位置编码维度
-        nhead=8,           # 注意力头数
-        num_layers=2,
-        dim_feedforward=256,
-        dropout=0.1
-    ).to(device)
+    model = FearGreedWuziqiModel().to(device)
     
     try:
         checkpoint = torch.load(model_path, map_location=device)

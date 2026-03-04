@@ -408,14 +408,7 @@ def main():
     print(f"验证集: {len(val_data)} 样本")
     
     print("\n[2/3] 初始化模型...")
-    model = FearGreedWuziqiModel(
-        state_dim=64,      # 棋盘状态维度
-        pos_dim=32,        # 位置编码维度
-        nhead=8,           # 注意力头数
-        num_layers=2,
-        dim_feedforward=256,
-        dropout=0.1
-    )
+    model = FearGreedWuziqiModel()
     
     trainer = Stage0Trainer(model, device, lr=args.lr)
     
