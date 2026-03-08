@@ -1,4 +1,8 @@
 # train_stage2_selfplay.py
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,7 +11,6 @@ import pickle
 import random
 import numpy as np
 import glob
-import os
 import json
 import time
 import argparse

@@ -84,7 +84,8 @@ class Stage0Trainer:
         full_path = os.path.join("stage0", filename)
         torch.save(checkpoint, full_path)
         self.model.to(self.device)
-        print(f"   💾 检查点已保存: {full_path}")
+        print(f"💾 检查点已保存: {full_path}")
+        print()
     
     def load_checkpoint(self, filename):
         """加载检查点"""
@@ -134,7 +135,7 @@ class Stage0Trainer:
         # 主损失：策略交叉熵
         policy_loss = F.cross_entropy(policy_logits, actions)
         
-        total_loss = policy_loss
+        total_loss = policy_loss.clone()
         
         # 辅助损失1：恐惧分数（如果有标签）
         fear_mask = [f is not None for f in fear_labels]
@@ -149,7 +150,7 @@ class Stage0Trainer:
             fear_targets = torch.stack(fear_targets)
             fear_scores = details['fear_scores']
             fear_loss = F.binary_cross_entropy(fear_scores, fear_targets)
-            total_loss += 0.3 * fear_loss
+            total_loss += 1 * fear_loss
         
         # 辅助损失2：贪婪分数（如果有标签）
         greed_mask = [g is not None for g in greed_labels]
@@ -164,94 +165,50 @@ class Stage0Trainer:
             greed_targets = torch.stack(greed_targets)
             greed_scores = details['greed_scores']
             greed_loss = F.binary_cross_entropy(greed_scores, greed_targets)
-            total_loss += 0.4 * greed_loss
+            total_loss += 1 * greed_loss
         
         self.optimizer.zero_grad()
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
         
-        return {'loss': total_loss.item(), 'policy_loss': policy_loss.item()}
+        return {
+            'total_loss': total_loss.item(),
+            'policy_loss': policy_loss.item(),
+            'greed_loss': greed_loss.item() if 'greed_loss' in locals() else 0.0,
+            'fear_loss': fear_loss.item() if 'fear_loss' in locals() else 0.0,
+        }
     
-    def train_epoch(self, dataset, batch_size=32):
+    def train_epoch(self, epoch, dataset, batch_size=32):
         self.model.train()
         total_loss = 0
+        total_policy = 0
+        total_greed = 0
+        total_fear = 0
         batch_count = 0
-        
+    
         indices = list(range(len(dataset)))
         random.shuffle(indices)
-        
+    
         for start_idx in range(0, len(dataset), batch_size):
             batch_indices = indices[start_idx:start_idx + batch_size]
             batch = [dataset[i] for i in batch_indices]
             stats = self.train_step(batch)
-            total_loss += stats['loss']
-            batch_count += 1
         
+            total_loss += stats['total_loss']
+            total_policy += stats['policy_loss']
+            total_fear += stats['fear_loss']
+            total_greed += stats['greed_loss']
+            batch_count += 1
+    
+        # 打印详细统计
+        print(f"Epoch {epoch:3d}: "
+          f"Total={total_loss/batch_count:.4f} "
+          f"(Policy={total_policy/batch_count:.4f}) "
+          f"(Greed={total_greed/batch_count:.4f} Fear={total_fear/batch_count:.4f})")
+    
         return {'loss': total_loss / batch_count}
     
-    def evaluate_accuracy_old(self, dataset, num_samples=200):
-        """只在fear/greed场景上评估"""
-        self.model.eval()
-        correct = 0
-        total = 0
-        
-        # 筛选fear和greed场景
-        unique_scenes = [d for d in dataset if d['scene_type'] in ['winning', 'losing', 'fear', 'greed']]
-        if len(unique_scenes) < num_samples:
-            samples = unique_scenes
-        else:
-            samples = random.sample(unique_scenes, num_samples)
-        
-        print(f"    评估场景: fear+greed共 {len(samples)} 个")
-        
-        with torch.no_grad():
-            for item in samples:
-                board = item['board']
-                player = item['player']
-                correct_action = item['move']
-
-                scene_type = item['scene_type']
-                fear_label = item.get('fear_label')
-                greed_label = item.get('greed_label')
-                
-                nearby = get_nearby_moves(board, distance=2)
-                if not nearby:
-                    continue
-                
-                board_tensor = torch.tensor(board, dtype=torch.long, device=self.device).unsqueeze(0)
-                player_tensor = torch.tensor([player], device=self.device)
-                
-                policy_logits, _ = self.model.forward_with_mask(
-                    board_tensor, player_tensor, legal_moves=[nearby]
-                )
-                
-                probs = F.softmax(policy_logits[0], dim=-1).cpu().numpy()
-                nearby_probs = [(pos, probs[pos]) for pos in nearby]
-                
-                if nearby_probs:
-                    predicted = max(nearby_probs, key=lambda x: x[1])[0]
-
-                    # 其他情况（理论上不会进入这里，因为只评估fear/greed）
-                    if predicted == correct_action:
-                        correct += 1
-                    elif scene_type == 'greed' and greed_label is not None:
-                        # 贪婪场景：只要选任意贪婪点就算对
-                        greed_positions = [i for i, v in enumerate(greed_label) if v > 0]
-                        if predicted in greed_positions:
-                            correct += 1
-                        else:
-                            # 可以打印调试信息
-                            pass
-                    elif scene_type == 'fear' and fear_label is not None:
-                        # 恐惧场景：只要选任意恐惧点就算对
-                        fear_positions = [i for i, v in enumerate(fear_label) if v > 0]
-                        if predicted in fear_positions:
-                            correct += 1
-                    total += 1
-        
-        return correct / total if total > 0 else 0
-
     def evaluate_accuracy(self, dataset, num_samples=200):
         """评估准确率 - 支持所有唯一场景"""
         self.model.eval()
@@ -265,7 +222,7 @@ class Stage0Trainer:
         else:
             samples = random.sample(unique_scenes, num_samples)
 
-        print(f"    评估场景: 唯一场景共 {len(samples)} 个")
+        print(f"评估场景: 唯一场景共 {len(samples)} 个")
         print(f"      winning/greed: {sum(1 for d in samples if d['scene_type'] in ['winning', 'greed'])}")
         print(f"      losing/fear: {sum(1 for d in samples if d['scene_type'] in ['losing', 'fear'])}")
 
@@ -311,7 +268,9 @@ class Stage0Trainer:
                 
                     total += 1
 
-        return correct / total if total > 0 else 0
+        val_acc = correct / total if total > 0 else 0
+        print(f"唯一场景准确率: {val_acc:.2%}\n")
+        return val_acc
 
 def load_stage0_dataset(filename="wuziqi_dataset_real.pkl"):
     """加载数据集"""
@@ -375,6 +334,140 @@ def load_stage0_dataset(filename="wuziqi_dataset_real.pkl"):
     
     return stage0_samples
 
+def random_transform(board, player, action, fear_label=None, greed_label=None):
+    """随机链式变换：镜像X → 镜像Y → 旋转"""
+    
+    # 1维转2维
+    board_2d = np.array(board).reshape(BOARD_SIZE, BOARD_SIZE)
+    r, c = action // BOARD_SIZE, action % BOARD_SIZE
+    
+    # 处理标签（如果有）
+    fear_2d = None
+    if fear_label is not None:
+        fear_2d = np.array(fear_label).reshape(BOARD_SIZE, BOARD_SIZE)
+    
+    greed_2d = None
+    if greed_label is not None:
+        greed_2d = np.array(greed_label).reshape(BOARD_SIZE, BOARD_SIZE)
+
+    # ===== 0. 随机颜色反转 =====
+    if random.choice([True, False]):
+        # 棋盘颜色反转：1↔2，0不变
+        board_2d = np.where(board_2d == 1, 2, np.where(board_2d == 2, 1, 0))
+        # player同步反转：1↔2
+        player = 3 - player
+
+    # ===== 1. 随机X镜像（左右翻转）=====
+    if random.choice([True, False]):
+        board_2d = np.fliplr(board_2d)
+        c = BOARD_SIZE - 1 - c
+        if fear_2d is not None:
+            fear_2d = np.fliplr(fear_2d)
+        if greed_2d is not None:
+            greed_2d = np.fliplr(greed_2d)
+    
+    # ===== 2. 随机Y镜像（上下翻转）=====
+    if random.choice([True, False]):
+        board_2d = np.flipud(board_2d)
+        r = BOARD_SIZE - 1 - r
+        if fear_2d is not None:
+            fear_2d = np.flipud(fear_2d)
+        if greed_2d is not None:
+            greed_2d = np.flipud(greed_2d)
+    
+    # ===== 3. 随机旋转 =====
+    rot = random.choice([0, 1, 2, 3])  # 0°, 90°, 180°, 270°
+    if rot > 0:
+        board_2d = np.rot90(board_2d, rot)
+        for _ in range(rot):
+            r, c = c, BOARD_SIZE - 1 - r
+        if fear_2d is not None:
+            fear_2d = np.rot90(fear_2d, rot)
+        if greed_2d is not None:
+            greed_2d = np.rot90(greed_2d, rot)
+    
+    # 转回1维
+    new_board = board_2d.flatten().tolist()
+    new_action = r * BOARD_SIZE + c
+    new_fear = fear_2d.flatten().tolist() if fear_2d is not None else None
+    new_greed = greed_2d.flatten().tolist() if greed_2d is not None else None
+    
+    return new_board, player, new_action, new_fear, new_greed
+
+def enhance_dataset(dataset):
+    """对数据集进行原地随机变换"""
+    enhanced = []
+    
+    for item in dataset:
+        # 字典方式读取
+        board = item['board']
+        player = item['player']
+        action = item['move']
+        value = item['value']
+        scene_type = item['scene_type']
+        fear_label = item.get('fear_label')
+        greed_label = item.get('greed_label')
+        
+        # 随机变换
+        new_board, new_action, new_fear, new_greed = random_transform(
+            board, action, fear_label, greed_label
+        )
+        
+        # 创建新样本（保持字典格式）
+        new_item = {
+            'board': new_board,
+            'player': player,
+            'move': new_action,
+            'value': value,
+            'scene_type': scene_type
+        }
+        if new_fear is not None:
+            new_item['fear_label'] = new_fear
+        if new_greed is not None:
+            new_item['greed_label'] = new_greed
+        
+        enhanced.append(new_item)
+    
+    return enhanced
+
+def get_transformed_dataset(dataset, epoch):
+    """根据轮数返回变换后的数据集"""
+    if epoch % 20 == 1 and epoch > 0:
+        print(f"第{epoch}轮：重新随机变换数据集\n")
+
+        transformed = []
+        for item in dataset:
+            # 读取所有字段
+            board = item['board']
+            player = item['player']  # ⚠️ 这个不能丢！
+            action = item['move']
+            value = item['value']
+            scene_type = item['scene_type']
+            fear = item.get('fear_label')
+            greed = item.get('greed_label')
+            
+            # 随机变换（只变换棋盘和动作，player不变）
+            new_board, new_player, new_action, new_fear, new_greed = random_transform(
+                board, player, action, fear, greed
+            )
+            
+            # 创建新样本，保持所有字段
+            new_item = {
+                'board': new_board,
+                'player': new_player,
+                'move': new_action,
+                'value': value,
+                'scene_type': scene_type
+            }
+            if new_fear is not None:
+                new_item['fear_label'] = new_fear
+            if new_greed is not None:
+                new_item['greed_label'] = new_greed
+            
+            transformed.append(new_item)
+        return transformed
+    return dataset  # 不变
+
 def main():
     parser = argparse.ArgumentParser(description='五子棋 Stage0 训练')
     parser.add_argument('--continue', '-c', action='store_true', default=True,
@@ -399,6 +492,8 @@ def main():
     print("\n[1/3] 加载数据集...")
     dataset = load_stage0_dataset("wuziqi_dataset_real.pkl")
     
+    #dataset = enhance_dataset(dataset)
+
     random.shuffle(dataset)
     split = int(len(dataset) * 0.9)
     train_data = dataset[:split]
@@ -433,18 +528,18 @@ def main():
     print("-" * 90)
     
     for epoch in range(trainer.start_epoch, args.epochs + 1):
-        train_stats = trainer.train_epoch(train_data, batch_size=32)
+        train_data = get_transformed_dataset(train_data, epoch)
+        train_stats = trainer.train_epoch(epoch, train_data, batch_size=32)
         
         if epoch % 5 == 0:
             val_acc = trainer.evaluate_accuracy(val_data)
-            print(f"\nEpoch {epoch:3d}/{args.epochs} | Loss: {train_stats['loss']:.4f} | 唯一场景准确率: {val_acc:.2%}")
-            
+
             if val_acc > trainer.best_acc:
                 trainer.best_acc = val_acc
                 # 保存最佳模型到stage0文件夹
                 torch.save(model.cpu().state_dict(), f"stage0/wuziqi_stage0_best_{val_acc:.0%}_epoch{epoch}.pth")
                 model.to(device)
-                print(f"          🏆 新最佳模型! 准确率={val_acc:.2%}")
+                print(f"🏆 新最佳模型! 准确率={val_acc:.2%}")
             
             if epoch % 10 == 0:
                 trainer.save_checkpoint(epoch, f"wuziqi_stage0_checkpoint_epoch{epoch}.pth")
