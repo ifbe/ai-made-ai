@@ -1,4 +1,3 @@
-# showdata.py
 import pickle
 import argparse
 import random
@@ -26,6 +25,105 @@ def getch():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     return ch
+
+def transform_board(board, player, action, fear_label=None, greed_label=None, 
+                    applied=None, random_mode=False):
+    """
+    变换函数
+    参数:
+        applied: [color, rot, flip_x, flip_y] 四个状态
+                 color: 0或1 是否黑白对调
+                 rot: 0,1,2,3 旋转次数 (1=顺时针90°, 2=180°, 3=270°)
+                 flip_x: 0或1 是否X翻转
+                 flip_y: 0或1 是否Y翻转
+        random_mode: 是否随机模式
+    返回:
+        new_board, new_player, new_action, new_fear, new_greed, new_applied
+    """
+    
+    if applied is None:
+        applied = [0, 0, 0, 0]
+    
+    # 1维转2维
+    board_2d = np.array(board).reshape(BOARD_SIZE, BOARD_SIZE)
+    r, c = action // BOARD_SIZE, action % BOARD_SIZE
+    
+    # 处理标签
+    fear_2d = None
+    if fear_label is not None:
+        fear_2d = np.array(fear_label).reshape(BOARD_SIZE, BOARD_SIZE)
+    
+    greed_2d = None
+    if greed_label is not None:
+        greed_2d = np.array(greed_label).reshape(BOARD_SIZE, BOARD_SIZE)
+    
+    new_applied = applied.copy()
+    
+    if random_mode:
+        # 随机模式：随机决定每个变换
+        new_applied[0] = random.choice([0, 1])
+        new_applied[1] = random.choice([0, 1, 2, 3])
+        new_applied[2] = random.choice([0, 1])
+        new_applied[3] = random.choice([0, 1])
+    
+    # ===== 应用变换（按固定顺序）=====
+    
+    # 1. 颜色反转
+    if new_applied[0]:
+        board_2d = np.where(board_2d == 1, 2, np.where(board_2d == 2, 1, 0))
+        player = 3 - player
+    
+    # 2. X翻转（左右）
+    if new_applied[2]:
+        board_2d = np.fliplr(board_2d)
+        c = BOARD_SIZE - 1 - c
+        if fear_2d is not None:
+            fear_2d = np.fliplr(fear_2d)
+        if greed_2d is not None:
+            greed_2d = np.fliplr(greed_2d)
+    
+    # 3. Y翻转（上下）
+    if new_applied[3]:
+        board_2d = np.flipud(board_2d)
+        r = BOARD_SIZE - 1 - r
+        if fear_2d is not None:
+            fear_2d = np.flipud(fear_2d)
+        if greed_2d is not None:
+            greed_2d = np.flipud(greed_2d)
+    
+    # 4. 旋转（顺时针）
+    if new_applied[1] > 0:
+        board_2d = np.rot90(board_2d, -new_applied[1])  # 负号=顺时针
+        for _ in range(new_applied[1]):
+            # 顺时针旋转坐标变换: (r,c) -> (c, BOARD_SIZE-1-r)
+            r, c = c, BOARD_SIZE - 1 - r
+        if fear_2d is not None:
+            fear_2d = np.rot90(fear_2d, -new_applied[1])
+        if greed_2d is not None:
+            greed_2d = np.rot90(greed_2d, -new_applied[1])
+    
+    # 转回1维
+    new_board = board_2d.flatten().tolist()
+    new_action = r * BOARD_SIZE + c
+    new_fear = fear_2d.flatten().tolist() if fear_2d is not None else None
+    new_greed = greed_2d.flatten().tolist() if greed_2d is not None else None
+    
+    return new_board, player, new_action, new_fear, new_greed, new_applied
+
+def format_transforms(applied):
+    """将applied数组格式化为显示字符串"""
+    if applied is None:
+        return "原始"
+    parts = []
+    if applied[0]:
+        parts.append("黑白对调")
+    if applied[1] > 0:
+        parts.append(f"旋转{applied[1]*90}°")
+    if applied[2]:
+        parts.append("X翻转")
+    if applied[3]:
+        parts.append("Y翻转")
+    return " → ".join(parts) if parts else "原始"
 
 def print_board_with_labels(board, player, fear_label=None, greed_label=None, action=None):
     """打印棋盘，用彩色字母显示恐惧/贪婪位置"""
@@ -91,12 +189,16 @@ def print_board_with_labels(board, player, fear_label=None, greed_label=None, ac
     
     print("   " + "└───" * BOARD_SIZE + "┘")
 
-def print_sample_details(item, index):
+def print_sample_details(item, index, applied=None):
     """打印单个样本的详细信息"""
     board, player, action, value, fear_label, greed_label, scene_type = item[:7]
     
     print("\n" + "=" * 100)
-    print(f"📌 样本 #{index}")
+    if applied is not None:
+        transform_str = format_transforms(applied)
+        print(f"📌 样本 #{index} (增强版: {transform_str})")
+    else:
+        print(f"📌 样本 #{index}")
     print("=" * 100)
     
     print(f"\n📋 基本信息:")
@@ -174,24 +276,84 @@ def browse_data(data):
     """交互式浏览 - 单键命令"""
     total = len(data)
     index = 0
-    
+    enhanced_mode = False
+    original_item = None
+    current_applied = [0, 0, 0, 0]
+
     while True:
         clear_screen()
-        print_sample_details(data[index], index)
         
+        if enhanced_mode and original_item is not None:
+            # 基于原始样本和当前状态重新生成
+            board, player, action, value, fear_label, greed_label, scene_type = original_item[:7]
+            
+            new_board, new_player, new_action, new_fear, new_greed, _ = transform_board(
+                board, player, action, fear_label, greed_label, applied=current_applied
+            )
+            
+            enhanced_item = (
+                new_board, new_player, new_action, value,
+                new_fear, new_greed, scene_type
+            )
+            print_sample_details(enhanced_item, index, applied=current_applied)
+        else:
+            print_sample_details(data[index], index)
+            original_item = data[index]
+
         print(f"\n📖 样本 {index+1}/{total}")
-        print("   [n]下一个  [p]上一个  [r]随机  [j]跳转  [q]退出   (直接按键，无需回车)")
-        
+        print("   [n]下一个  [p]上一个  [r]随机  [e]随机增强")
+        print("   [1]黑白互换 [2]旋转90° [3]X翻转 [4]Y翻转 [c]取消增强 [j]跳转 [q]退出")
+        print("   (直接按键，无需回车)")
+        if enhanced_mode:
+            print(f"   当前状态: {format_transforms(current_applied)}")
+
         cmd = getch().lower()
-        
+
         if cmd == 'n':
             index = (index + 1) % total
+            enhanced_mode = False
+            current_applied = [0, 0, 0, 0]
         elif cmd == 'p':
             index = (index - 1) % total
+            enhanced_mode = False
+            current_applied = [0, 0, 0, 0]
         elif cmd == 'r':
-            # 随机跳转
             index = random.randint(0, total-1)
-            print(f"\n🎲 随机跳转到样本 #{index}")
+            enhanced_mode = False
+            current_applied = [0, 0, 0, 0]
+        elif cmd == 'e':
+            # 随机增强
+            item = data[index]
+            board, player, action, value, fear_label, greed_label, scene_type = item[:7]
+            
+            _, _, _, _, _, new_applied = transform_board(
+                board, player, action, fear_label, greed_label, random_mode=True
+            )
+            
+            original_item = item
+            current_applied = new_applied
+            enhanced_mode = True
+            
+        elif cmd in ['1', '2', '3', '4']:
+            if not enhanced_mode:
+                original_item = data[index]
+                enhanced_mode = True
+                current_applied = [0, 0, 0, 0]
+            
+            # 切换对应状态
+            if cmd == '1':
+                current_applied[0] = 1 - current_applied[0]
+            elif cmd == '2':
+                current_applied[1] = (current_applied[1] + 1) % 4
+            elif cmd == '3':
+                current_applied[2] = 1 - current_applied[2]
+            elif cmd == '4':
+                current_applied[3] = 1 - current_applied[3]
+            
+        elif cmd == 'c':
+            if enhanced_mode:
+                enhanced_mode = False
+                current_applied = [0, 0, 0, 0]
         elif cmd == 'j':
             print("\n\033[K输入样本索引: ", end="", flush=True)
             
@@ -203,6 +365,8 @@ def browse_data(data):
                 new_idx = int(sys.stdin.readline().strip())
                 if 0 <= new_idx < total:
                     index = new_idx
+                    enhanced_mode = False
+                    current_applied = [0, 0, 0, 0]
                 else:
                     print(f"索引必须在 0-{total-1} 之间")
                     print("按任意键继续...", end="", flush=True)
@@ -239,7 +403,7 @@ def main():
         return
     
     if args.type:
-        filtered = [item for item in data if item[6] == args.type]
+        filtered = [item for item in data if len(item) >= 7 and item[6] == args.type]
         print(f"筛选后: {len(filtered)} 条")
         data = filtered
     

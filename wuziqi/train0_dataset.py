@@ -335,29 +335,30 @@ def load_stage0_dataset(filename="wuziqi_dataset_real.pkl"):
     return stage0_samples
 
 def random_transform(board, player, action, fear_label=None, greed_label=None):
-    """随机链式变换：镜像X → 镜像Y → 旋转"""
-    
+    """随机链式变换：颜色反转 → 镜像X → 镜像Y → 旋转（统一顺时针）"""
+
     # 1维转2维
     board_2d = np.array(board).reshape(BOARD_SIZE, BOARD_SIZE)
     r, c = action // BOARD_SIZE, action % BOARD_SIZE
-    
+
     # 处理标签（如果有）
     fear_2d = None
     if fear_label is not None:
         fear_2d = np.array(fear_label).reshape(BOARD_SIZE, BOARD_SIZE)
-    
+
     greed_2d = None
     if greed_label is not None:
         greed_2d = np.array(greed_label).reshape(BOARD_SIZE, BOARD_SIZE)
 
-    # ===== 0. 随机颜色反转 =====
+    # ===== 1. 随机颜色反转 =====
     if random.choice([True, False]):
         # 棋盘颜色反转：1↔2，0不变
         board_2d = np.where(board_2d == 1, 2, np.where(board_2d == 2, 1, 0))
         # player同步反转：1↔2
         player = 3 - player
+        # 颜色反转不影响标签的位置，只改变棋子颜色，所以 fear/greed 不变
 
-    # ===== 1. 随机X镜像（左右翻转）=====
+    # ===== 2. 随机X镜像（左右翻转）=====
     if random.choice([True, False]):
         board_2d = np.fliplr(board_2d)
         c = BOARD_SIZE - 1 - c
@@ -365,8 +366,8 @@ def random_transform(board, player, action, fear_label=None, greed_label=None):
             fear_2d = np.fliplr(fear_2d)
         if greed_2d is not None:
             greed_2d = np.fliplr(greed_2d)
-    
-    # ===== 2. 随机Y镜像（上下翻转）=====
+
+    # ===== 3. 随机Y镜像（上下翻转）=====
     if random.choice([True, False]):
         board_2d = np.flipud(board_2d)
         r = BOARD_SIZE - 1 - r
@@ -374,24 +375,29 @@ def random_transform(board, player, action, fear_label=None, greed_label=None):
             fear_2d = np.flipud(fear_2d)
         if greed_2d is not None:
             greed_2d = np.flipud(greed_2d)
-    
-    # ===== 3. 随机旋转 =====
-    rot = random.choice([0, 1, 2, 3])  # 0°, 90°, 180°, 270°
+
+    # ===== 4. 随机旋转（顺时针）=====
+    rot = random.choice([0, 1, 2, 3])  # 0°, 90°, 180°, 270° 顺时针
     if rot > 0:
-        board_2d = np.rot90(board_2d, rot)
+        # 顺时针旋转棋盘（np.rot90 默认逆时针，用 -rot 变成顺时针）
+        board_2d = np.rot90(board_2d, -rot)
+        
+        # 顺时针旋转坐标变换
         for _ in range(rot):
             r, c = c, BOARD_SIZE - 1 - r
+            
+        # 同步旋转标签
         if fear_2d is not None:
-            fear_2d = np.rot90(fear_2d, rot)
+            fear_2d = np.rot90(fear_2d, -rot)
         if greed_2d is not None:
-            greed_2d = np.rot90(greed_2d, rot)
-    
+            greed_2d = np.rot90(greed_2d, -rot)
+
     # 转回1维
     new_board = board_2d.flatten().tolist()
     new_action = r * BOARD_SIZE + c
     new_fear = fear_2d.flatten().tolist() if fear_2d is not None else None
     new_greed = greed_2d.flatten().tolist() if greed_2d is not None else None
-    
+
     return new_board, player, new_action, new_fear, new_greed
 
 def enhance_dataset(dataset):
